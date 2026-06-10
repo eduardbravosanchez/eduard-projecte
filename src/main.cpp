@@ -87,6 +87,7 @@ volatile bool      g_alarmFired  = false;       // true quan l'alarma s'ha dispa
 volatile bool      g_snoozed     = false;       // true si s'ha activat el snooze
 volatile bool      g_forcesMono  = false;       // true si l'usuari ha forçat mode mono
 volatile bool      g_isStereo    = false;       // true si el chip detecta senyal estèreo
+volatile bool g_radioMuted = true;  // la radio arranca silenciada
 AlarmConfig        g_alarm       = { ALARM_HOUR_DEF, ALARM_MIN_DEF, false };
 DateTime           g_now;                       // Hora actual, actualitzada per rtc_task
 
@@ -457,40 +458,44 @@ void ui_task(void *pv) {
             }
         }
 
-        // ── BTN_SNOOZE — només actua quan l'alarma està sonant ───────────────
-        if (readBtn(PIN_BTN_SNOOZE) && g_alarmFired) {
-            if (!g_snoozed) {
-                // Primer pols: activar snooze — silenciar i reprogramar 5 minuts més tard
-                g_snoozed    = true;
-                g_alarmFired = false;
-                if (xSemaphoreTake(mutex_i2c, pdMS_TO_TICKS(100)) == pdTRUE) {
-                    radio.setMute(true); // Silenciar la ràdio
-                    xSemaphoreGive(mutex_i2c);
-                }
-                // Calcular nova hora d'alarma (amb gestió del pas de hora)
-                uint8_t newMin  = (g_alarm.minute + SNOOZE_MINUTES) % 60;
-                uint8_t newHour = g_alarm.hour;
-                if (g_alarm.minute + SNOOZE_MINUTES >= 60) newHour = (newHour + 1) % 24;
-                g_alarm.minute = newMin;
-                g_alarm.hour   = newHour;
-                AlarmEvent ev = EVT_SNOOZE;
-                xQueueSend(q_alarm_event, &ev, 0);
-                Serial.printf("[SNOOZE] Reactivant a %02d:%02d\n", newHour, newMin);
-            } else {
-                // Segon pols: apagar l'alarma definitivament i restaurar hora original
-                g_alarmFired   = false;
-                g_snoozed      = false;
-                g_alarm.hour   = tmpHour;   // Recuperar hora original (abans del snooze)
-                g_alarm.minute = tmpMin;
-                if (xSemaphoreTake(mutex_i2c, pdMS_TO_TICKS(100)) == pdTRUE) {
-                    radio.setMute(true);
-                    xSemaphoreGive(mutex_i2c);
-                }
-                AlarmEvent ev = EVT_OFF;
-                xQueueSend(q_alarm_event, &ev, 0);
-                Serial.println("[ALARM] Apagada");
+        // ── BTN_SNOOZE ────────────────────────────────────────────────────────────
+if (readBtn(PIN_BTN_SNOOZE)) {
+    if (g_alarmFired) {
+        // ── Alarma sonando: comportament actual ───────────────────────────
+        if (!g_snoozed) {
+            g_snoozed = true; g_alarmFired = false;
+            if (xSemaphoreTake(mutex_i2c, pdMS_TO_TICKS(100)) == pdTRUE) {
+                radio.setMute(true); xSemaphoreGive(mutex_i2c);
             }
+            uint8_t newMin  = (g_alarm.minute + SNOOZE_MINUTES) % 60;
+            uint8_t newHour = g_alarm.hour;
+            if (g_alarm.minute + SNOOZE_MINUTES >= 60) newHour = (newHour + 1) % 24;
+            g_alarm.minute = newMin; g_alarm.hour = newHour;
+            AlarmEvent ev = EVT_SNOOZE;
+            xQueueSend(q_alarm_event, &ev, 0);
+            Serial.printf("[SNOOZE] Reactivant a %02d:%02d\n", newHour, newMin);
+        } else {
+            g_alarmFired = false; g_snoozed = false;
+            g_alarm.hour = tmpHour; g_alarm.minute = tmpMin;
+            if (xSemaphoreTake(mutex_i2c, pdMS_TO_TICKS(100)) == pdTRUE) {
+                radio.setMute(true); xSemaphoreGive(mutex_i2c);
+            }
+            AlarmEvent ev = EVT_OFF;
+            xQueueSend(q_alarm_event, &ev, 0);
+            Serial.println("[ALARM] Apagada");
         }
+    } else {
+        // ── Alarma NO sonant: toggle mute/unmute de la radio ──────────────
+        g_radioMuted = !g_radioMuted;
+        if (xSemaphoreTake(mutex_i2c, pdMS_TO_TICKS(100)) == pdTRUE) {
+            radio.setMute(g_radioMuted);
+            xSemaphoreGive(mutex_i2c);
+        }
+        Serial.printf("[RADIO] %s\n", g_radioMuted ? "MUTE" : "ON");
+        // Redibuixar zona freqüència per mostrar l'estat
+        drawFreq();
+    }
+}
 
         // ── BTN_MONO_ST — alternar entre mono forçat i estèreo automàtic ─────
         if (readBtn(PIN_BTN_MONO_ST) && setMode == SET_NONE) {
@@ -737,11 +742,18 @@ void drawScreen() {
 // Dibuixa la freqüència FM actual (zona Y 90-124)
 void drawFreq() {
     tft.fillRect(0, 90, 320, 35, ILI9341_BLACK);
-    tft.setTextColor(ILI9341_CYAN); tft.setTextSize(2);
-    tft.setCursor(10, 100);
-    // Convertir de unitats 10kHz a format "XX.X MHz"
-    // Exemple: 9360 → 93.6 MHz → "93.6 MHz"
-    tft.printf("FM  %d.%d MHz", g_fmFreq / 100, (g_fmFreq % 100) / 10);
+    tft.setTextSize(2);
+    if (g_radioMuted) {
+        tft.setTextColor(ILI9341_DARKGREY);
+        tft.setCursor(10, 100);
+        tft.printf("FM  %d.%d MHz  [MUTE]",
+            g_fmFreq / 100, (g_fmFreq % 100) / 10);
+    } else {
+        tft.setTextColor(ILI9341_CYAN);
+        tft.setCursor(10, 100);
+        tft.printf("FM  %d.%d MHz",
+            g_fmFreq / 100, (g_fmFreq % 100) / 10);
+    }
 }
 
 // Dibuixa "Buscant emisora..." mentre es fa el seek (zona Y 90-124)
