@@ -15,6 +15,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include <Arduino.h>
+#include "config.h"             // Configuració global de pins, ràdio i FreeRTOS
+#include "version.h"            // Control de versions del firmware
 #include <Wire.h>               // Comunicació I2C (TEA5767 + DS3231)
 #include <SPI.h>                // Comunicació SPI (TFT ILI9341)
 #include <RTClib.h>             // Llibreria per al rellotge DS3231
@@ -27,39 +29,6 @@
 #include <freertos/task.h>      // Gestió de tasques FreeRTOS
 #include <freertos/semphr.h>    // Semàfors i mutexos FreeRTOS
 #include <freertos/queue.h>     // Cues de missatges FreeRTOS
-
-// ── Pines ─────────────────────────────────────────────────────────────────────
-#define PIN_SDA          8    // Línia de dades I2C (TEA5767 + DS3231 compartits)
-#define PIN_SCL          9    // Línia de rellotge I2C
-#define PIN_TFT_MOSI    11    // Dades SPI cap al TFT
-#define PIN_TFT_CLK     12    // Rellotge SPI
-#define PIN_TFT_CS      10    // Chip Select del TFT
-#define PIN_TFT_DC      13    // Data/Command del TFT
-#define PIN_TFT_RST     14    // Reset del TFT
-#define PIN_BTN_FM_UP    1    // Polsador: buscar emisora cap amunt
-#define PIN_BTN_FM_DOWN  2    // Polsador: buscar emisora cap avall
-#define PIN_BTN_SET      3    // Polsador: ajust alarma (curt) / ajust hora (llarg)
-#define PIN_BTN_SNOOZE   4    // Polsador: snooze / apagar alarma
-#define PIN_BTN_MONO_ST  5    // Polsador: alternar mono / estèreo
-
-// ── Freqüències en unitats de 10 kHz ─────────────────────────────────────────
-// El TEA5767 treballa internament en kHz. Per evitar floats usem x10:
-// 8750 = 87.50 MHz, 10800 = 108.00 MHz, 9360 = 93.60 MHz
-#define FM_MIN          8750
-#define FM_MAX         10800
-#define FM_DEFAULT      9360
-
-// Nivell de parada del seek hardware del TEA5767 (bits SSL al registre 3):
-//   0x20 = nivell 5  (troba emisores dèbils)
-//   0x40 = nivell 7  (recomanat, equilibri senyal/soroll)
-//   0x60 = nivell 10 (només emisores molt fortes)
-#define TEA_SSL  0x40
-
-// ── Alarma ────────────────────────────────────────────────────────────────────
-#define SNOOZE_MINUTES     5   // Minuts que espera el snooze abans de tornar a sonar
-#define DEBOUNCE_MS       50   // Temps de filtratge de rebot mecànic dels polsadors (ms)
-#define ALARM_HOUR_DEF     7   // Hora per defecte de l'alarma en el primer arrencada
-#define ALARM_MIN_DEF      0   // Minut per defecte de l'alarma
 
 // ── Tipus de dades ────────────────────────────────────────────────────────────
 
@@ -83,10 +52,10 @@ Preferences      prefs;                                // Emmagatzematge NVS
 // S'accedeix des de múltiples tasques FreeRTOS; les volàtils eviten optimitzacions
 // del compilador que podrien llegir valors obsolets de registres de la CPU
 volatile uint16_t  g_fmFreq      = FM_DEFAULT; // Freqüència actual en unitats 10kHz
-volatile bool      g_alarmFired  = false;       // true quan l'alarma s'ha disparat
-volatile bool      g_snoozed     = false;       // true si s'ha activat el snooze
-volatile bool      g_forcesMono  = false;       // true si l'usuari ha forçat mode mono
-volatile bool      g_isStereo    = false;       // true si el chip detecta senyal estèreo
+volatile bool      g_alarmFired  = false;      // true quan l'alarma s'ha disparat
+volatile bool      g_snoozed     = false;      // true si s'ha activat el snooze
+volatile bool      g_forcesMono  = false;      // true si l'usuari ha forçat mode mono
+volatile bool      g_isStereo    = false;      // true si el chip detecta senyal estèreo
 volatile bool g_radioMuted = true;  // la radio arranca silenciada
 AlarmConfig        g_alarm       = { ALARM_HOUR_DEF, ALARM_MIN_DEF, false };
 DateTime           g_now;                       // Hora actual, actualitzada per rtc_task
@@ -118,10 +87,16 @@ bool     readBtn        (uint8_t pin);
 void setup() {
     Serial.begin(115200); // Port sèrie per depuració (monitor sèrie PlatformIO)
 
+    Serial.printf("\n=============================================\n");
+    Serial.printf(" Projecte: D.05 Despertador FM Real\n");
+    Serial.printf(" Firmware Versió: %s\n", FIRMWARE_VERSION_STR);
+    Serial.printf(" Data de compilació: %s - %s\n", FIRMWARE_BUILD_DATE, FIRMWARE_BUILD_TIME);
+    Serial.printf("=============================================\n\n");
+
     // ── 1. Crear primitives FreeRTOS ABANS de crear tasques ───────────────────
     // Si es creessin les tasques primer, podrien intentar usar mutex_i2c = NULL
     mutex_i2c     = xSemaphoreCreateMutex();           // Protegeix el bus I2C
-    sem_alarm     = xSemaphoreCreateBinary();           // Senyal d'alarma disparada
+    sem_alarm     = xSemaphoreCreateBinary();          // Senyal d'alarma disparada
     q_alarm_event = xQueueCreate(4, sizeof(AlarmEvent)); // Cua d'esdeveniments d'alarma
 
     // ── 2. Configurar polsadors com a entrades amb pull-up intern ─────────────
@@ -168,12 +143,12 @@ void setup() {
 
     // ── 7. Carregar configuració guardada a NVS (memòria flash) ──────────────
     // Les dades persisteixen entre reinicis i talls de corrent
-    prefs.begin("despertador", false);
-    g_alarm.hour    = prefs.getUChar ("alh",  ALARM_HOUR_DEF); // Hora alarma
-    g_alarm.minute  = prefs.getUChar ("alm",  ALARM_MIN_DEF);  // Minut alarma
-    g_alarm.enabled = prefs.getBool  ("ale",  false);           // Alarma activa?
-    g_fmFreq        = prefs.getUShort("freq", FM_DEFAULT);      // Última freqüència
-    g_forcesMono    = prefs.getBool  ("mono", false);           // Mode mono forçat?
+    prefs.begin(NVS_NAMESPACE, false);
+    g_alarm.hour    = prefs.getUChar (NVS_KEY_ALARM_H, ALARM_HOUR_DEF); // Hora alarma
+    g_alarm.minute  = prefs.getUChar (NVS_KEY_ALARM_M, ALARM_MIN_DEF);  // Minut alarma
+    g_alarm.enabled = prefs.getBool  (NVS_KEY_ALARM_E, false);          // Alarma activa?
+    g_fmFreq        = prefs.getUShort(NVS_KEY_FREQ,    FM_DEFAULT);     // Última freqüència
+    g_forcesMono    = prefs.getBool  (NVS_KEY_MONO,    false);          // Mode mono forçat?
     prefs.end();
 
     // Aplicar la freqüència i el mode mono/estèreo carregats de NVS
@@ -184,9 +159,9 @@ void setup() {
     // Cada tasca té la seva pròpia pila i prioritat. Les tasques d'alta prioritat
     // interrompen les de baixa quan necessiten CPU.
     // Paràmetres: funció, nom, mida pila (bytes), paràmetre, prioritat, handle, nucli
-    xTaskCreatePinnedToCore(rtc_task,   "rtc",   2048, NULL, 3, NULL, 1); // Prio 3: llegeix hora
-    xTaskCreatePinnedToCore(alarm_task, "alarm", 2048, NULL, 4, NULL, 1); // Prio 4: comprova alarma
-    xTaskCreatePinnedToCore(ui_task,    "ui",    4096, NULL, 2, NULL, 1); // Prio 2: pantalla + polsadors
+    xTaskCreatePinnedToCore(rtc_task,   "rtc",   TASK_RTC_STACK,   NULL, TASK_RTC_PRIO,   NULL, TASK_RUNNING_CORE); // Prio 3: llegeix hora
+    xTaskCreatePinnedToCore(alarm_task, "alarm", TASK_ALARM_STACK, NULL, TASK_ALARM_PRIO, NULL, TASK_RUNNING_CORE); // Prio 4: comprova alarma
+    xTaskCreatePinnedToCore(ui_task,    "ui",    TASK_UI_STACK,    NULL, TASK_UI_PRIO,    NULL, TASK_RUNNING_CORE); // Prio 2: pantalla + polsadors
 
     Serial.println("[OK] Setup complet");
 }
@@ -211,7 +186,7 @@ void rtc_task(void *pv) {
             // El chip retorna 5 bytes d'estat; el bit 7 del byte 2 indica STEREO
             if (!g_forcesMono) {
                 uint8_t buf[5] = {0};
-                Wire.requestFrom(0x60, 5); // Sol·licitar 5 bytes al TEA5767 (adreça 0x60)
+                Wire.requestFrom(TEA5767_I2C_ADDR, 5); // Sol·licitar 5 bytes al TEA5767
                 for (int i = 0; i < 5; i++) buf[i] = Wire.available() ? Wire.read() : 0;
                 g_isStereo = (buf[2] >> 7) & 0x01; // Bit 7 del byte 2 = indicador STEREO
             } else {
@@ -406,10 +381,10 @@ void ui_task(void *pv) {
                         g_alarm.hour    = tmpHour;
                         g_alarm.minute  = tmpMin;
                         g_alarm.enabled = true;
-                        prefs.begin("despertador", false);
-                        prefs.putUChar("alh", g_alarm.hour);
-                        prefs.putUChar("alm", g_alarm.minute);
-                        prefs.putBool ("ale", true);
+                        prefs.begin(NVS_NAMESPACE, false);
+                        prefs.putUChar(NVS_KEY_ALARM_H, g_alarm.hour);
+                        prefs.putUChar(NVS_KEY_ALARM_M, g_alarm.minute);
+                        prefs.putBool (NVS_KEY_ALARM_E, true);
                         prefs.end();
                         setMode = SET_NONE;
                         tft.fillScreen(ILI9341_BLACK);
@@ -459,43 +434,43 @@ void ui_task(void *pv) {
         }
 
         // ── BTN_SNOOZE ────────────────────────────────────────────────────────────
-if (readBtn(PIN_BTN_SNOOZE)) {
-    if (g_alarmFired) {
-        // ── Alarma sonando: comportament actual ───────────────────────────
-        if (!g_snoozed) {
-            g_snoozed = true; g_alarmFired = false;
-            if (xSemaphoreTake(mutex_i2c, pdMS_TO_TICKS(100)) == pdTRUE) {
-                radio.setMute(true); xSemaphoreGive(mutex_i2c);
+        if (readBtn(PIN_BTN_SNOOZE)) {
+            if (g_alarmFired) {
+                // ── Alarma sonando: comportament actual ───────────────────────────
+                if (!g_snoozed) {
+                    g_snoozed = true; g_alarmFired = false;
+                    if (xSemaphoreTake(mutex_i2c, pdMS_TO_TICKS(100)) == pdTRUE) {
+                        radio.setMute(true); xSemaphoreGive(mutex_i2c);
+                    }
+                    uint8_t newMin  = (g_alarm.minute + SNOOZE_MINUTES) % 60;
+                    uint8_t newHour = g_alarm.hour;
+                    if (g_alarm.minute + SNOOZE_MINUTES >= 60) newHour = (newHour + 1) % 24;
+                    g_alarm.minute = newMin; g_alarm.hour = newHour;
+                    AlarmEvent ev = EVT_SNOOZE;
+                    xQueueSend(q_alarm_event, &ev, 0);
+                    Serial.printf("[SNOOZE] Reactivant a %02d:%02d\n", newHour, newMin);
+                } else {
+                    g_alarmFired = false; g_snoozed = false;
+                    g_alarm.hour = tmpHour; g_alarm.minute = tmpMin;
+                    if (xSemaphoreTake(mutex_i2c, pdMS_TO_TICKS(100)) == pdTRUE) {
+                        radio.setMute(true); xSemaphoreGive(mutex_i2c);
+                    }
+                    AlarmEvent ev = EVT_OFF;
+                    xQueueSend(q_alarm_event, &ev, 0);
+                    Serial.println("[ALARM] Apagada");
+                }
+            } else {
+                // ── Alarma NO sonant: toggle mute/unmute de la radio ──────────────
+                g_radioMuted = !g_radioMuted;
+                if (xSemaphoreTake(mutex_i2c, pdMS_TO_TICKS(100)) == pdTRUE) {
+                    radio.setMute(g_radioMuted);
+                    xSemaphoreGive(mutex_i2c);
+                }
+                Serial.printf("[RADIO] %s\n", g_radioMuted ? "MUTE" : "ON");
+                // Redibuixar zona freqüència per mostrar l'estat
+                drawFreq();
             }
-            uint8_t newMin  = (g_alarm.minute + SNOOZE_MINUTES) % 60;
-            uint8_t newHour = g_alarm.hour;
-            if (g_alarm.minute + SNOOZE_MINUTES >= 60) newHour = (newHour + 1) % 24;
-            g_alarm.minute = newMin; g_alarm.hour = newHour;
-            AlarmEvent ev = EVT_SNOOZE;
-            xQueueSend(q_alarm_event, &ev, 0);
-            Serial.printf("[SNOOZE] Reactivant a %02d:%02d\n", newHour, newMin);
-        } else {
-            g_alarmFired = false; g_snoozed = false;
-            g_alarm.hour = tmpHour; g_alarm.minute = tmpMin;
-            if (xSemaphoreTake(mutex_i2c, pdMS_TO_TICKS(100)) == pdTRUE) {
-                radio.setMute(true); xSemaphoreGive(mutex_i2c);
-            }
-            AlarmEvent ev = EVT_OFF;
-            xQueueSend(q_alarm_event, &ev, 0);
-            Serial.println("[ALARM] Apagada");
         }
-    } else {
-        // ── Alarma NO sonant: toggle mute/unmute de la radio ──────────────
-        g_radioMuted = !g_radioMuted;
-        if (xSemaphoreTake(mutex_i2c, pdMS_TO_TICKS(100)) == pdTRUE) {
-            radio.setMute(g_radioMuted);
-            xSemaphoreGive(mutex_i2c);
-        }
-        Serial.printf("[RADIO] %s\n", g_radioMuted ? "MUTE" : "ON");
-        // Redibuixar zona freqüència per mostrar l'estat
-        drawFreq();
-    }
-}
 
         // ── BTN_MONO_ST — alternar entre mono forçat i estèreo automàtic ─────
         if (readBtn(PIN_BTN_MONO_ST) && setMode == SET_NONE) {
@@ -503,8 +478,8 @@ if (readBtn(PIN_BTN_SNOOZE)) {
             applyMonoStereo();             // Aplicar el canvi al chip TEA5767
 
             // Guardar la preferència a NVS perquè es recordi en reinicis
-            prefs.begin("despertador", false);
-            prefs.putBool("mono", g_forcesMono);
+            prefs.begin(NVS_NAMESPACE, false);
+            prefs.putBool(NVS_KEY_MONO, g_forcesMono);
             prefs.end();
 
             Serial.printf("[AUDIO] Mode: %s\n", g_forcesMono ? "MONO forçat" : "STEREO auto");
@@ -567,7 +542,7 @@ void tea_write(uint16_t freq10kHz, bool searchMode, bool searchUp, uint8_t ssl) 
     b[4] = 0x00;
 
     // Enviar els 5 bytes al TEA5767 per I2C (adreça 0x60)
-    Wire.beginTransmission(0x60);
+    Wire.beginTransmission(TEA5767_I2C_ADDR);
     for (int i = 0; i < 5; i++) Wire.write(b[i]);
     Wire.endTransmission();
 }
@@ -593,7 +568,7 @@ uint16_t tea_seek_once(bool up, uint16_t fromFreq) {
         vTaskDelay(pdMS_TO_TICKS(50));
 
         // Llegir els 5 bytes d'estat del TEA5767
-        Wire.requestFrom(0x60, 5);
+        Wire.requestFrom(TEA5767_I2C_ADDR, 5);
         for (int i = 0; i < 5; i++) resp[i] = Wire.available() ? Wire.read() : 0;
 
         bool rf  = (resp[0] >> 7) & 0x01; // RF=1: ha trobat una emisora
@@ -615,232 +590,4 @@ uint16_t tea_seek_once(bool up, uint16_t fromFreq) {
     return 0; // Timeout: el chip no ha respost en 5 segons
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// seekAndUpdate — cerca la propera emisora i actualitza la pantalla
-//
-// Garanteix que SEMPRE es canvia a una freqüència diferent a l'actual:
-//  1. Comença un pas més enllà de la freqüència actual
-//  2. Si el chip retorna la mateixa freqüència, salta un pas i reintenta
-//  3. Si arriba al límit de banda, intenta des de l'extrem contrari (wrap)
-//  4. Màxim 3 intents abans de rendir-se
-// ═════════════════════════════════════════════════════════════════════════════
-void seekAndUpdate(bool up) {
-    drawSeeking(); // Mostrar "Buscant emisora..." mentre dura la cerca
-
-    uint16_t original = g_fmFreq; // Guardar la freqüència actual per comparar
-    uint16_t result   = original;
-
-    // Agafar el mutex I2C amb timeout generós (el seek pot trigar fins a 5s)
-    if (xSemaphoreTake(mutex_i2c, pdMS_TO_TICKS(15000)) == pdTRUE) {
-
-        uint16_t startFreq = original;
-        int maxAttempts    = 3;
-
-        for (int attempt = 0; attempt < maxAttempts; attempt++) {
-            // Calcular el punt de partida: sempre un pas més enllà de l'actual
-            uint16_t from = startFreq;
-            if (up) {
-                from += 1;
-                if (from > FM_MAX) from = FM_MIN; // Wrap al principi de la banda
-            } else {
-                from -= 1;
-                if (from < FM_MIN) from = FM_MAX; // Wrap al final de la banda
-            }
-
-            Serial.printf("[SEEK] Intent %d des de %d.%d MHz\n",
-                attempt + 1, from / 100, (from % 100) / 10);
-
-            uint16_t found = tea_seek_once(up, from);
-
-            if (found == 0) {
-                // Ha arribat al límit de banda → intentar des de l'extrem contrari
-                Serial.println("[SEEK] Límit de banda, wrap");
-                startFreq = up ? FM_MIN : FM_MAX;
-                continue;
-            }
-
-            if (found != original) {
-                // Ha trobat una freqüència diferent → èxit
-                result = found;
-                Serial.printf("[SEEK] OK: %d.%d MHz\n", result / 100, (result % 100) / 10);
-                break;
-            }
-
-            // Ha retornat la mateixa freqüència (problema de rodoneig del PLL)
-            // → saltar un pas i reintentar
-            Serial.println("[SEEK] Mateixa freqüència, saltant");
-            startFreq = found;
-        }
-
-        // Sintonitzar en mode normal (SM=0) a la freqüència final trobada
-        tea_write(result, false, false, 0);
-        vTaskDelay(pdMS_TO_TICKS(150)); // Esperar estabilització del chip
-        g_fmFreq = result;
-        xSemaphoreGive(mutex_i2c);
-    }
-
-    // Guardar la nova freqüència a NVS per recordar-la en el proper reinici
-    prefs.begin("despertador", false);
-    prefs.putUShort("freq", g_fmFreq);
-    prefs.end();
-
-    drawFreq(); // Actualitzar la freqüència a la pantalla
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-// applyFmFreq — sintonitza g_fmFreq en mode normal (sense seek)
-// S'usa en l'arrencada per aplicar la freqüència guardada a NVS
-// ═════════════════════════════════════════════════════════════════════════════
-void applyFmFreq() {
-    if (xSemaphoreTake(mutex_i2c, pdMS_TO_TICKS(200)) == pdTRUE) {
-        tea_write(g_fmFreq, false, false, 0);
-        vTaskDelay(pdMS_TO_TICKS(100));
-        xSemaphoreGive(mutex_i2c);
-    }
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-// applyMonoStereo — aplica el mode mono/estèreo al chip sense canviar freqüència
-// Reescriu els registres del TEA5767 amb el bit MS actualitzat
-// ═════════════════════════════════════════════════════════════════════════════
-void applyMonoStereo() {
-    if (xSemaphoreTake(mutex_i2c, pdMS_TO_TICKS(200)) == pdTRUE) {
-        tea_write(g_fmFreq, false, false, 0); // tea_write ja inclou el bit MS
-        vTaskDelay(pdMS_TO_TICKS(80));
-        xSemaphoreGive(mutex_i2c);
-    }
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-// Funcions de pantalla
-//
-// Layout del TFT (320×240 píxels, orientació landscape):
-//   Y   0- 84  → Hora gran (HH:MM) + segons petits
-//   Y  90-124  → Freqüència FM actual
-//   Y 130-189  → Estat de l'alarma
-//   Y 195-240  → Indicador mono/estèreo
-// ═════════════════════════════════════════════════════════════════════════════
-
-// Redibuixa tota la pantalla principal (s'invoca cada segon)
-void drawScreen() {
-    // ── Hora gran ──────────────────────────────────────────────────────────────
-    tft.fillRect(0, 0, 320, 85, ILI9341_BLACK); // Esborrar zona de l'hora
-    tft.setTextColor(ILI9341_WHITE); tft.setTextSize(5); // Text gran blanc
-    tft.setCursor(30, 15);
-    tft.printf("%02d:%02d", g_now.hour(), g_now.minute()); // HH:MM
-
-    // Segons petits en gris (confirma que el RTC està actualitzant-se)
-    tft.setTextColor(ILI9341_DARKGREY); tft.setTextSize(2);
-    tft.setCursor(250, 50);
-    tft.printf(":%02d", g_now.second());
-
-    drawFreq();
-    drawAlarmStatus();
-    drawMonoStereo();
-}
-
-// Dibuixa la freqüència FM actual (zona Y 90-124)
-void drawFreq() {
-    tft.fillRect(0, 90, 320, 35, ILI9341_BLACK);
-    tft.setTextSize(2);
-    if (g_radioMuted) {
-        tft.setTextColor(ILI9341_DARKGREY);
-        tft.setCursor(10, 100);
-        tft.printf("FM  %d.%d MHz  [MUTE]",
-            g_fmFreq / 100, (g_fmFreq % 100) / 10);
-    } else {
-        tft.setTextColor(ILI9341_CYAN);
-        tft.setCursor(10, 100);
-        tft.printf("FM  %d.%d MHz",
-            g_fmFreq / 100, (g_fmFreq % 100) / 10);
-    }
-}
-
-// Dibuixa "Buscant emisora..." mentre es fa el seek (zona Y 90-124)
-void drawSeeking() {
-    tft.fillRect(0, 90, 320, 35, ILI9341_BLACK);
-    tft.setTextColor(ILI9341_YELLOW); tft.setTextSize(2);
-    tft.setCursor(10, 100);
-    tft.print("Buscant emisora...");
-}
-
-// Dibuixa l'estat de l'alarma (zona Y 130-189)
-void drawAlarmStatus() {
-    tft.fillRect(0, 130, 320, 60, ILI9341_BLACK);
-    tft.setTextSize(2);
-    if (g_alarmFired) {
-        // L'alarma està sonant: text vermell parpellejant
-        tft.setTextColor(ILI9341_RED);
-        tft.setCursor(10, 138); tft.print("! ALARMA SONANT !");
-        tft.setCursor(10, 160); tft.print("Snooze o apagar");
-    } else if (g_alarm.enabled) {
-        // Alarma programada i activa: mostrar hora en verd
-        tft.setTextColor(ILI9341_GREEN);
-        tft.setCursor(10, 138);
-        tft.printf("Alarma: %02d:%02d  ON", g_alarm.hour, g_alarm.minute);
-        if (g_snoozed) {
-            // El snooze està actiu: mostrar avís en taronja
-            tft.setTextColor(ILI9341_ORANGE);
-            tft.setCursor(10, 160); tft.print("(snooze actiu)");
-        }
-    } else {
-        // Alarma desactivada
-        tft.setTextColor(ILI9341_DARKGREY);
-        tft.setCursor(10, 138); tft.print("Alarma: OFF");
-        tft.setCursor(10, 160); tft.print("SET per programar");
-    }
-}
-
-// Dibuixa l'indicador mono/estèreo (zona Y 195-240)
-// Tres estats possibles segons g_forcesMono i g_isStereo:
-//   MONO (forçat) — l'usuari ha forçat mono manualment → vermell
-//   STEREO        — l'emisora emet en estèreo i el chip ho detecta → groc
-//   MONO (emisora)— mode automàtic però l'emisora no emet estèreo → vermell
-void drawMonoStereo() {
-    tft.fillRect(0, 195, 320, 45, ILI9341_BLACK);
-    tft.setTextSize(2);
-
-    if (g_forcesMono) {
-        // L'usuari ha forçat mono: indicador vermell + instrucció per tornar a estèreo
-        tft.setTextColor(ILI9341_RED);
-        tft.setCursor(10, 205);
-        tft.print("MONO  (forcat)");
-        tft.setTextColor(ILI9341_YELLOW);
-        tft.setCursor(10, 222);
-        tft.print("Prem MONO/ST p/ stereo");
-    } else if (g_isStereo) {
-        // Estèreo actiu: indicador groc + instrucció per forçar mono
-        tft.setTextColor(ILI9341_YELLOW);
-        tft.setCursor(10, 205);
-        tft.print("STEREO");
-        tft.setTextColor(ILI9341_YELLOW);
-        tft.setCursor(10, 222);
-        tft.print("Prem MONO/ST p/ mono");
-    } else {
-        // Mode automàtic però l'emisora no dona estèreo
-        tft.setTextColor(ILI9341_RED);
-        tft.setCursor(10, 205);
-        tft.print("MONO  (emisora)");
-        tft.setTextColor(ILI9341_YELLOW);
-        tft.setCursor(10, 222);
-        tft.print("Prem MONO/ST p/ forcar");
-    }
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-// readBtn — lectura de polsador amb antirebote per software
-//
-// Retorna true si el polsador ha estat premut i alliberat.
-// El bucle while espera a que es deixi anar per evitar deteccions múltiples.
-// ═════════════════════════════════════════════════════════════════════════════
-bool readBtn(uint8_t pin) {
-    if (digitalRead(pin) == LOW) {                       // Pin a GND = polsador premut
-        vTaskDelay(pdMS_TO_TICKS(DEBOUNCE_MS));          // Esperar estabilització mecànica
-        if (digitalRead(pin) == LOW) {                   // Confirmar que segueix premut
-            while (digitalRead(pin) == LOW)              // Esperar a que es deixi anar
-                vTaskDelay(pdMS_TO_TICKS(10));
-            return true;                                 // Polsació vàlida detectada
-        }
-    }
-    return false; // No s'ha detectat cap polsació
-}
+// ════════════════════════════════════════════
