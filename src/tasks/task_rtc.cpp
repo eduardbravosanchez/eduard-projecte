@@ -8,7 +8,7 @@
 // Llegeix el DS3231 cada segon i actualitza g_now i g_isStereo.
 // Protegeix l'accés I2C amb mutex_i2c per evitar col·lisions amb alarm_task.
 // ═════════════════════════════════════════════════════════════════════════════
-void rtc_task(void *pv) {
+void task_rtc(void *pv) {
     for (;;) {
         // Intentar agafar el mutex I2C; si no s'aconsegueix en 100ms, saltar
         if (xSemaphoreTake(mutex_i2c, pdMS_TO_TICKS(100)) == pdTRUE) {

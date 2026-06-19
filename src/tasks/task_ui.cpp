@@ -8,7 +8,7 @@
 // És la tasca de menor prioritat perquè un retard de ms en la pantalla
 // és imperceptible, mentre que l'àudio i l'alarma han de ser puntuals.
 // ═════════════════════════════════════════════════════════════════════════════
-void ui_task(void *pv) {
+void task_ui(void *pv) {
 
     // Màquina d'estats del menú de configuració
     enum SetMode {

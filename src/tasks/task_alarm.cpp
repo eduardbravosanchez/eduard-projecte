@@ -7,7 +7,7 @@
 // Comprova cada 500ms si l'hora actual coincideix amb l'alarma programada.
 // Quan es dispara, activa l'àudio del TEA5767 i notifica la ui_task.
 // ═════════════════════════════════════════════════════════════════════════════
-void alarm_task(void *pv) {
+void task_alarm(void *pv) {
     uint8_t lastMinuteTriggered = 99; // Evita disparar l'alarma dues vegades al mateix minut
 
     for (;;) {

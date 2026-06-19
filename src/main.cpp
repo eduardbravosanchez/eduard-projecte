@@ -87,9 +87,9 @@ void setup() {
     applyMonoStereo();
 
     // 5. Crear les tasques FreeRTOS
-    xTaskCreatePinnedToCore(rtc_task,   "rtc",   TASK_RTC_STACK,   NULL, TASK_RTC_PRIO,   NULL, TASK_RUNNING_CORE);
-    xTaskCreatePinnedToCore(alarm_task, "alarm", TASK_ALARM_STACK, NULL, TASK_ALARM_PRIO, NULL, TASK_RUNNING_CORE);
-    xTaskCreatePinnedToCore(ui_task,    "ui",    TASK_UI_STACK,    NULL, TASK_UI_PRIO,    NULL, TASK_RUNNING_CORE);
+    xTaskCreatePinnedToCore(task_rtc,   "rtc",   TASK_RTC_STACK,   NULL, TASK_RTC_PRIO,   NULL, TASK_RUNNING_CORE);
+    xTaskCreatePinnedToCore(task_alarm, "alarm", TASK_ALARM_STACK, NULL, TASK_ALARM_PRIO, NULL, TASK_RUNNING_CORE);
+    xTaskCreatePinnedToCore(task_ui,    "ui",    TASK_UI_STACK,    NULL, TASK_UI_PRIO,    NULL, TASK_RUNNING_CORE);
 
     Serial.println("[OK] Tasques actives i sistema llest.");
 }
