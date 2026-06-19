@@ -1,10 +1,10 @@
-#include <Arduino.h>
+﻿#include <Arduino.h>
 #include <Wire.h>
 #include <SPI.h>
 #include "config.h"
 #include "version.h"
 #include "globals.h"
-#include "app_tasks.h" // Inclusió obligatòria de les tasques modularitzades
+#include "app_tasks.h" 
 
 // ── INSTANCIACIÓ REAL DELS OBJECTES I VARIABLES GLOBALS ───────────────────────
 RTC_DS3231       rtc;
@@ -86,7 +86,7 @@ void setup() {
     applyFmFreq();
     applyMonoStereo();
 
-    // 5. Crear les tasques FreeRTOS (les funcions es troben a src/tasks/)
+    // 5. Crear les tasques FreeRTOS
     xTaskCreatePinnedToCore(rtc_task,   "rtc",   TASK_RTC_STACK,   NULL, TASK_RTC_PRIO,   NULL, TASK_RUNNING_CORE);
     xTaskCreatePinnedToCore(alarm_task, "alarm", TASK_ALARM_STACK, NULL, TASK_ALARM_PRIO, NULL, TASK_RUNNING_CORE);
     xTaskCreatePinnedToCore(ui_task,    "ui",    TASK_UI_STACK,    NULL, TASK_UI_PRIO,    NULL, TASK_RUNNING_CORE);
@@ -97,7 +97,7 @@ void setup() {
 void loop() { vTaskDelay(portMAX_DELAY); }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// LOGICA DE DRIVERS INTERNS (Es desglossarà posteriorment a src/drivers/)
+// LOGICA DE DRIVERS INTERNS (Últim pas pendent d'extreure)
 // ═════════════════════════════════════════════════════════════════════════════
 void tea_write(uint16_t freq10kHz, bool searchMode, bool searchUp, uint8_t ssl) {
     uint32_t freqKhz = (uint32_t)freq10kHz * 10;
@@ -180,112 +180,4 @@ void applyMonoStereo() {
         tea_write(g_fmFreq, false, true, TEA_SSL);
         xSemaphoreGive(mutex_i2c);
     }
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-// LOGICA DE INTERFICIE VISUAL (Es desglossarà posteriorment a src/ui/)
-// ═════════════════════════════════════════════════════════════════════════════
-void drawScreen() {
-    tft.fillRect(10, 10, 220, 45, ILI9341_BLACK);
-    tft.setTextColor(ILI9341_WHITE);
-    tft.setTextSize(3);
-    tft.setCursor(10, 10);
-    tft.printf("%02d:%02d:%02d", g_now.hour(), g_now.minute(), g_now.second());
-
-    tft.setTextSize(1);
-    tft.setTextColor(ILI9341_GREEN);
-    tft.setCursor(10, 42);
-    tft.printf("%02d/%02d/%04d", g_now.day(), g_now.month(), g_now.year());
-
-    drawFreq();
-    drawAlarmStatus();
-    drawMonoStereo();
-}
-
-void drawFreq() {
-    tft.fillRect(10, 140, 300, 50, ILI9341_BLACK);
-    tft.setTextSize(4);
-    if (g_radioMuted) {
-        tft.setTextColor(ILI9341_DARKGREY);
-    } else {
-        tft.setTextColor(ILI9341_ORANGE);
-    }
-    tft.setCursor(10, 140);
-    tft.printf("%3d.%02d", g_fmFreq / 100, g_fmFreq % 100);
-    
-    tft.setTextSize(2);
-    tft.setCursor(200, 155);
-    tft.print("MHz");
-
-    if (g_radioMuted) {
-        tft.setTextSize(1);
-        tft.setTextColor(ILI9341_RED);
-        tft.setCursor(250, 160);
-        tft.print("[MUTED]");
-    }
-}
-
-void drawSeeking() {
-    tft.fillRect(240, 145, 75, 20, ILI9341_BLACK);
-    tft.setTextSize(1);
-    tft.setTextColor(ILI9341_YELLOW);
-    tft.setCursor(240, 150);
-    tft.print("SEARCHING");
-}
-
-void drawAlarmStatus() {
-    tft.fillRect(10, 210, 300, 20, ILI9341_BLACK);
-    tft.setTextSize(2);
-    if (g_alarm.enabled) {
-        if (g_alarmFired) {
-            tft.setTextColor(ILI9341_RED);
-            tft.setCursor(10, 210);
-            tft.print("¡ALARMA SONANT!");
-        } else if (g_snoozed) {
-            tft.setTextColor(ILI9341_YELLOW);
-            tft.setCursor(10, 210);
-            tft.printf("Snooze... %02d:%02d", g_alarm.hour, g_alarm.minute);
-        } else {
-            tft.setTextColor(ILI9341_GREEN);
-            tft.setCursor(10, 210);
-            tft.printf("Alarma ON  %02d:%02d", g_alarm.hour, g_alarm.minute);
-        }
-    } else {
-        tft.setTextColor(ILI9341_DARKGREY);
-        tft.setCursor(10, 210);
-        tft.print("Alarma OFF");
-    }
-}
-
-void drawMonoStereo() {
-    tft.fillRect(240, 10, 75, 25, ILI9341_BLACK);
-    tft.setTextSize(1);
-    if (g_forcesMono) {
-        tft.setTextColor(ILI9341_BLUE);
-        tft.setCursor(240, 15);
-        tft.print("M_FORCE");
-    } else {
-        if (g_isStereo) {
-            tft.setTextColor(ILI9341_CYAN);
-            tft.setCursor(240, 15);
-            tft.print("STEREO");
-        } else {
-            tft.setTextColor(ILI9341_LIGHTGREY);
-            tft.setCursor(240, 15);
-            tft.print("MONO");
-        }
-    }
-}
-
-bool readBtn(uint8_t pin) {
-    if (digitalRead(pin) == LOW) {
-        vTaskDelay(pdMS_TO_TICKS(50));
-        if (digitalRead(pin) == LOW) {
-            while (digitalRead(pin) == LOW) {
-                vTaskDelay(pdMS_TO_TICKS(10));
-            }
-            return true;
-        }
-    }
-    return false;
 }
